@@ -1,0 +1,3 @@
+([('redis-gui-client',
+   '/Users/chameera/Desktop/redis-client/dist/redis-gui-client',
+   'EXECUTABLE')],)
