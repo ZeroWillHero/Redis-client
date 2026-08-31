@@ -2,6 +2,8 @@
 
 A modern, cross-platform (macOS, Windows, Linux) desktop GUI client for Redis, built with Python, Tkinter, and `ttkbootstrap`. Designed for local development/testing: run raw commands, browse and edit keys of every type, watch server stats, and manage multiple saved connections.
 
+![Redis GUI Client](assets/redis-client.png)
+
 ## Features
 - Multiple saved connection profiles (host, port, password, DB index, SSL)
 - Key browser with `SCAN`-based search/filter, type badges, create/delete
