@@ -122,6 +122,26 @@ class RedisClient:
     def zrem(self, key: str, member: str) -> None:
         self._conn.zrem(key, member)
 
+    # ---- hash / set / zset pagination ----
+    def hscan_page(self, key: bytes | str, cursor: int = 0, count: int = 100) -> tuple[int, dict]:
+        return self._conn.hscan(key, cursor=cursor, count=count)
+
+    def sscan_page(self, key: bytes | str, cursor: int = 0, count: int = 100) -> tuple[int, list]:
+        return self._conn.sscan(key, cursor=cursor, count=count)
+
+    def zscan_page(self, key: bytes | str, cursor: int = 0, count: int = 100) -> tuple[int, list]:
+        return self._conn.zscan(key, cursor=cursor, count=count)
+
+    # ---- stream ----
+    def xrange(self, key: bytes | str, count: int = 100) -> list:
+        return self._conn.xrange(key, count=count)
+
+    def xadd(self, key: str, fields: dict) -> str:
+        return self._conn.xadd(key, fields)
+
+    def xdel(self, key: str, entry_id: str) -> None:
+        self._conn.xdel(key, entry_id)
+
     # ---- console / raw ----
     def execute_raw(self, command_str: str) -> Any:
         parts = shlex.split(command_str)
@@ -136,6 +156,23 @@ class RedisClient:
     def dbsize(self) -> int:
         return self._conn.dbsize()
 
+    # ---- diagnostics ----
+    def memory_usage(self, key: bytes | str) -> int | None:
+        return self._conn.memory_usage(key)
+
+    def slowlog_get(self, count: int = 20) -> list:
+        return self._conn.slowlog_get(count)
+
+    # ---- copy / export / import ----
+    def copy_key(self, source: str, dest: str) -> bool:
+        return bool(self._conn.copy(source, dest))
+
+    def dump_key(self, key: bytes | str) -> bytes | None:
+        return self._conn.dump(key)
+
+    def restore_key(self, key: str, ttl_ms: int, payload: bytes, replace: bool = True) -> None:
+        self._conn.restore(key, ttl_ms, payload, replace=replace)
+
 
 class TaskRunner:
     """Runs blocking callables on a background thread pool and delivers
@@ -145,14 +182,38 @@ class TaskRunner:
         self._root = tk_root
         self._executor = ThreadPoolExecutor(max_workers=4)
 
-    def run(self, func: Callable, on_success: Callable[[Any], None], on_error: Callable[[Exception], None], *args, **kwargs) -> None:
+    def run(
+        self,
+        func: Callable,
+        on_success: Callable[[Any], None],
+        on_error: Callable[[Exception], None],
+        *args,
+        on_start: Callable[[], None] | None = None,
+        on_done: Callable[[], None] | None = None,
+        **kwargs,
+    ) -> None:
+        if on_start:
+            on_start()
+
         def worker():
             try:
                 result = func(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001
-                self._root.after(0, lambda: on_error(exc))
+                def deliver_error():
+                    try:
+                        on_error(exc)
+                    finally:
+                        if on_done:
+                            on_done()
+                self._root.after(0, deliver_error)
             else:
-                self._root.after(0, lambda: on_success(result))
+                def deliver_success():
+                    try:
+                        on_success(result)
+                    finally:
+                        if on_done:
+                            on_done()
+                self._root.after(0, deliver_success)
 
         self._executor.submit(worker)
 

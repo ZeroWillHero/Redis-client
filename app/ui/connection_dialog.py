@@ -6,6 +6,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from app.connection_manager import ConnectionProfile
+from app.ui import theme
 
 
 class ConnectionDialog(ctk.CTkToplevel):
@@ -18,10 +19,13 @@ class ConnectionDialog(ctk.CTkToplevel):
         self.on_save = on_save
         self.profile = profile or ConnectionProfile()
 
+        self.configure(fg_color=theme.BACKGROUND)
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", side="bottom", padx=20, pady=(0, 20))
-        ctk.CTkButton(btn_row, text="Cancel", fg_color="transparent", border_width=1, command=self.destroy).pack(side="left")
-        ctk.CTkButton(btn_row, text="Save", command=self._save).pack(side="right")
+        ctk.CTkButton(btn_row, text="Cancel", corner_radius=theme.RADIUS_SM,
+                      command=self.destroy, **theme.ghost_button_style()).pack(side="left")
+        ctk.CTkButton(btn_row, text="Save", corner_radius=theme.RADIUS_SM,
+                      command=self._save, **theme.primary_button_style()).pack(side="right")
 
         frame = ctk.CTkFrame(self, fg_color="transparent")
         frame.pack(fill="both", expand=True, padx=20, pady=20)
@@ -46,7 +50,7 @@ class ConnectionDialog(ctk.CTkToplevel):
 
         ctk.CTkSwitch(frame, text="Use SSL/TLS", variable=self.ssl_var).pack(anchor="w", pady=(16, 12))
 
-        self.error_label = ctk.CTkLabel(frame, text="", text_color="#e74c3c")
+        self.error_label = ctk.CTkLabel(frame, text="", text_color=theme.DESTRUCTIVE)
         self.error_label.pack(anchor="w", pady=(0, 8))
 
         self.transient(master)

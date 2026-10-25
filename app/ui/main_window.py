@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from app.config import APP_NAME, APPEARANCE_LIGHT, APPEARANCE_DARK, COLOR_THEME
+from app.config import APP_NAME, APPEARANCE_DARK, COLOR_THEME
 from app.connection_manager import ConnectionManager, ConnectionProfile
 from app.redis_client import RedisClient, TaskRunner
+from app.settings import load_settings
 from app.utils import format_redis_error
-from app.ui.widgets import Toolbar, StatusBar
+from app.ui import theme
+from app.ui.widgets import Toolbar, StatusBar, ToastManager, busy_scope
 from app.ui.connection_dialog import ConnectionDialog
 from app.ui.key_browser import KeyBrowser
 from app.ui.console_tab import ConsoleTab
@@ -16,6 +18,7 @@ from app.ui.key_editors.hash_editor import HashEditor
 from app.ui.key_editors.list_editor import ListEditor
 from app.ui.key_editors.set_editor import SetEditor
 from app.ui.key_editors.zset_editor import ZSetEditor
+from app.ui.key_editors.stream_editor import StreamEditor
 
 TYPE_EDITORS = {
     "string": StringEditor,
@@ -23,19 +26,22 @@ TYPE_EDITORS = {
     "list": ListEditor,
     "set": SetEditor,
     "zset": ZSetEditor,
+    "stream": StreamEditor,
 }
 
-ctk.set_appearance_mode(APPEARANCE_LIGHT)
+_settings = load_settings()
+_initial_mode = _settings.get("appearance_mode", "light")
+ctk.set_appearance_mode(_initial_mode)
 ctk.set_default_color_theme(COLOR_THEME)
 
 
 class ConnectionRow(ctk.CTkFrame):
     def __init__(self, master, profile: ConnectionProfile, on_click, on_context_menu):
-        super().__init__(master, fg_color="transparent", corner_radius=6)
+        super().__init__(master, fg_color="transparent", corner_radius=theme.RADIUS_SM)
         self.profile = profile
         self.on_click = on_click
         label = ctk.CTkLabel(
-            self, text=f"{profile.name}\n{profile.host}:{profile.port}", anchor="w", justify="left", font=("Segoe UI", 12)
+            self, text=f"{profile.name}\n{profile.host}:{profile.port}", anchor="w", justify="left", font=theme.font_body(12)
         )
         label.pack(fill="x", padx=8, pady=6)
         for widget in (self, label):
@@ -45,7 +51,7 @@ class ConnectionRow(ctk.CTkFrame):
             widget.bind("<Button-3>", lambda e: on_context_menu(e, profile.id))
 
     def set_selected(self, selected: bool) -> None:
-        self.configure(fg_color="gray25" if selected else "transparent")
+        self.configure(fg_color=theme.SURFACE_HOVER if selected else "transparent")
 
 
 class MainWindow(ctk.CTk):
@@ -53,7 +59,8 @@ class MainWindow(ctk.CTk):
         super().__init__()
         self.title(APP_NAME)
         self.geometry("1280x800")
-        self._dark = False
+        self.configure(fg_color=theme.BACKGROUND)
+        self._dark = _initial_mode == APPEARANCE_DARK
 
         self.conn_manager = ConnectionManager()
         self.client: RedisClient | None = None
@@ -69,7 +76,7 @@ class MainWindow(ctk.CTk):
         self.toolbar = Toolbar(self, on_refresh=self._refresh_all, on_theme_toggle=self._toggle_theme)
         self.toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
 
-        self.sidebar = ctk.CTkFrame(self, width=300, corner_radius=0)
+        self.sidebar = ctk.CTkFrame(self, width=300, corner_radius=0, fg_color=theme.SURFACE)
         self.sidebar.grid(row=1, column=0, sticky="nsw")
         self.sidebar.grid_propagate(False)
 
@@ -79,13 +86,33 @@ class MainWindow(ctk.CTk):
         self.status_bar = StatusBar(self)
         self.status_bar.grid(row=2, column=0, columnspan=2, sticky="ew")
 
+        self.toast_manager = ToastManager(self)
+
         self._build_sidebar_connections()
         self.key_browser_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.key_browser = None
 
         self._build_main_tabs_placeholder()
+        self._bind_shortcuts()
+        self._ping_loop()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ---------- Keyboard shortcuts ----------
+    def _bind_shortcuts(self) -> None:
+        self.bind_all("<Control-k>", lambda _e: self._focus_key_search())
+        self.bind_all("<Control-d>", lambda _e: self._toggle_theme())
+        self.bind_all("<Control-r>", lambda _e: self._refresh_all())
+
+    def _focus_key_search(self) -> None:
+        if self.key_browser:
+            self.key_browser.focus_search()
+
+    # ---------- Connection health ----------
+    def _ping_loop(self) -> None:
+        if self.client:
+            self.runner.run(self.client.ping, lambda _ok: None, lambda _e: self._on_connect_error(_e, silent=True))
+        self.after(15000, self._ping_loop)
 
     # ---------- Sidebar: connection list ----------
     def _build_sidebar_connections(self) -> None:
@@ -94,8 +121,9 @@ class MainWindow(ctk.CTk):
 
         header = ctk.CTkFrame(pad, fg_color="transparent")
         header.pack(fill="x")
-        ctk.CTkLabel(header, text="Connections", font=("Segoe UI", 14, "bold")).pack(side="left")
-        ctk.CTkButton(header, text="+", width=28, command=self._add_connection).pack(side="right")
+        ctk.CTkLabel(header, text="Connections", font=theme.font_heading(14)).pack(side="left")
+        ctk.CTkButton(header, text="+", width=28, corner_radius=theme.RADIUS_SM,
+                      command=self._add_connection, **theme.primary_button_style()).pack(side="right")
 
         self.conn_scroll = ctk.CTkScrollableFrame(pad, fg_color="transparent", height=140)
         self.conn_scroll.pack(fill="x", pady=(8, 8))
@@ -103,9 +131,13 @@ class MainWindow(ctk.CTk):
 
         btn_row = ctk.CTkFrame(pad, fg_color="transparent")
         btn_row.pack(fill="x", pady=(0, 12))
-        ctk.CTkButton(btn_row, text="Connect", command=self._connect_selected).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        ctk.CTkButton(btn_row, text="Edit", fg_color="transparent", border_width=1, width=60, command=self._edit_selected).pack(side="left", padx=4)
-        ctk.CTkButton(btn_row, text="Del", fg_color="transparent", border_width=1, width=50, text_color="#e74c3c", command=self._delete_selected_conn).pack(side="left")
+        self.connect_btn = ctk.CTkButton(btn_row, text="Connect", corner_radius=theme.RADIUS_SM,
+                                          command=self._connect_selected, **theme.primary_button_style())
+        self.connect_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ctk.CTkButton(btn_row, text="Edit", width=60, corner_radius=theme.RADIUS_SM,
+                      command=self._edit_selected, **theme.ghost_button_style()).pack(side="left", padx=4)
+        ctk.CTkButton(btn_row, text="Del", width=50, corner_radius=theme.RADIUS_SM,
+                      command=self._delete_selected_conn, **theme.destructive_button_style()).pack(side="left")
 
         self._sidebar_content_pad = pad
 
@@ -140,7 +172,7 @@ class MainWindow(ctk.CTk):
     def _edit_selected(self) -> None:
         profile = self._selected_profile()
         if not profile:
-            self.status_bar.set_text("Select a connection to edit.", "error")
+            self.toast_manager.show("Select a connection to edit.", "error")
             return
         ConnectionDialog(self, on_save=self._on_profile_saved, profile=profile)
 
@@ -180,23 +212,28 @@ class MainWindow(ctk.CTk):
     def _connect_selected(self) -> None:
         profile = self._selected_profile()
         if not profile:
-            self.status_bar.set_text("Select a connection first.", "error")
+            self.toast_manager.show("Select a connection first.", "error")
             return
         if self.client:
             self.client.close()
             self.runner = TaskRunner(self)
         self.client = RedisClient(profile)
-        self.runner.run(self.client.ping, lambda _ok: self._on_connected(profile), self._on_connect_error)
+        start, stop = busy_scope([self.connect_btn], self.toolbar.spinner)
+        self.runner.run(
+            self.client.ping, lambda _ok: self._on_connected(profile), self._on_connect_error,
+            on_start=start, on_done=stop,
+        )
 
     def _on_connected(self, profile: ConnectionProfile) -> None:
         self.toolbar.set_connected(profile.name)
-        self.status_bar.set_text(f"Connected to {profile.host}:{profile.port}", "success")
+        self.toast_manager.show(f"Connected to {profile.host}:{profile.port}", "success")
         self._build_key_browser()
         self._build_main_tabs()
 
-    def _on_connect_error(self, exc: Exception) -> None:
+    def _on_connect_error(self, exc: Exception, silent: bool = False) -> None:
         self.toolbar.set_connected(None)
-        self.status_bar.set_text(format_redis_error(exc), "error")
+        if not silent:
+            self.toast_manager.show(format_redis_error(exc), "error")
         self.client = None
 
     # ---------- Sidebar: key browser ----------
@@ -206,7 +243,8 @@ class MainWindow(ctk.CTk):
         self.key_browser_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.key_browser_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         self.key_browser = KeyBrowser(
-            self.key_browser_frame, self.client, self.runner, self.status_bar, on_select=self._on_key_selected
+            self.key_browser_frame, self.client, self.runner, self.toast_manager,
+            self.toolbar.spinner, on_select=self._on_key_selected,
         )
         self.key_browser.pack(fill="both", expand=True)
         self.key_browser.refresh()
@@ -216,28 +254,28 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(
             self.main_pane,
             text="Add or select a connection to get started.",
-            font=("Segoe UI", 14),
-            text_color="gray60",
+            font=theme.font_body(14),
+            text_color=theme.MUTED_FOREGROUND,
         ).pack(expand=True)
 
     def _build_main_tabs(self) -> None:
         for child in self.main_pane.winfo_children():
             child.destroy()
 
-        self.tabview = ctk.CTkTabview(self.main_pane)
+        self.tabview = ctk.CTkTabview(self.main_pane, fg_color=theme.SURFACE, corner_radius=theme.RADIUS_LG)
         self.tabview.pack(fill="both", expand=True)
         self.data_tab = self.tabview.add("Data")
         self.tabview.add("Console")
         self.tabview.add("Server Info")
 
-        ctk.CTkLabel(self.data_tab, text="Select a key from the browser to view/edit it.", text_color="gray60").pack(pady=20)
+        ctk.CTkLabel(self.data_tab, text="Select a key from the browser to view/edit it.", text_color=theme.MUTED_FOREGROUND).pack(pady=20)
 
         console_container = self.tabview.tab("Console")
-        self.console_tab = ConsoleTab(console_container, self.client, self.runner, self.status_bar)
+        self.console_tab = ConsoleTab(console_container, self.client, self.runner, self.toast_manager)
         self.console_tab.pack(fill="both", expand=True)
 
         info_container = self.tabview.tab("Server Info")
-        self.info_tab = ServerInfoTab(info_container, self.client, self.runner, self.status_bar)
+        self.info_tab = ServerInfoTab(info_container, self.client, self.runner, self.toast_manager)
         self.info_tab.pack(fill="both", expand=True)
 
     def _on_key_selected(self, key: str) -> None:
@@ -250,21 +288,38 @@ class MainWindow(ctk.CTk):
     def _render_editor(self, key: str, type_name: str) -> None:
         editor_cls = TYPE_EDITORS.get(type_name)
         if editor_cls is None:
-            ctk.CTkLabel(self.data_tab, text=f"Type '{type_name}' is not yet supported for editing.", text_color="gray60").pack(pady=20)
+            ctk.CTkLabel(self.data_tab, text=f"Type '{type_name}' is not yet supported for editing.", text_color=theme.MUTED_FOREGROUND).pack(pady=20)
             return
-        editor = editor_cls(self.data_tab, self.client, self.runner, key, self.status_bar, on_change=self._on_data_changed)
+        editor = editor_cls(
+            self.data_tab, self.client, self.runner, key, self.toast_manager,
+            on_change=self._on_data_changed, on_key_renamed=self._on_key_renamed, on_key_deleted=self._on_key_deleted,
+        )
         editor.pack(fill="both", expand=True)
 
     def _on_editor_error(self, exc: Exception) -> None:
-        self.status_bar.set_text(format_redis_error(exc), "error")
+        self.toast_manager.show(format_redis_error(exc), "error")
 
     def _on_data_changed(self) -> None:
         if self.key_browser:
             self.key_browser.refresh()
 
+    def _on_key_renamed(self, new_name: str) -> None:
+        self.active_key = new_name
+        if self.key_browser:
+            self.key_browser.refresh()
+        self._on_key_selected(new_name)
+
+    def _on_key_deleted(self) -> None:
+        self.active_key = None
+        for child in self.data_tab.winfo_children():
+            child.destroy()
+        ctk.CTkLabel(self.data_tab, text="Select a key from the browser to view/edit it.", text_color=theme.MUTED_FOREGROUND).pack(pady=20)
+        if self.key_browser:
+            self.key_browser.refresh()
+
     def _refresh_all(self) -> None:
         if not self.client:
-            self.status_bar.set_text("Not connected.", "error")
+            self.toast_manager.show("Not connected.", "error")
             return
         if self.key_browser:
             self.key_browser.refresh()
@@ -275,7 +330,7 @@ class MainWindow(ctk.CTk):
 
     def _toggle_theme(self) -> None:
         self._dark = not self._dark
-        ctk.set_appearance_mode(APPEARANCE_DARK if self._dark else APPEARANCE_LIGHT)
+        theme.apply_appearance_mode(APPEARANCE_DARK if self._dark else "light")
 
     def _on_close(self) -> None:
         if self.client:

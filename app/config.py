@@ -4,6 +4,7 @@ from pathlib import Path
 APP_NAME = "Redis GUI Client"
 APP_DIR = Path.home() / ".redis_gui_client"
 CONNECTIONS_FILE = APP_DIR / "connections.json"
+SETTINGS_FILE = APP_DIR / "settings.json"
 
 DEFAULT_SCAN_COUNT = 300
 DEFAULT_CONNECT_TIMEOUT = 4.0

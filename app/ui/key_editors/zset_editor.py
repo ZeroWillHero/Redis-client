@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
+from app.ui import theme
+from app.ui.widgets import KeyMetaBar
 from app.utils import decode_bytes, format_redis_error
 
 
@@ -9,29 +11,32 @@ class ZSetRow(ctk.CTkFrame):
     def __init__(self, master, member: str, score: float, on_remove):
         super().__init__(master, fg_color="transparent")
         ctk.CTkLabel(self, text=member, anchor="w").pack(side="left", fill="x", expand=True, padx=(4, 8))
-        ctk.CTkLabel(self, text=str(score), width=80, text_color="gray60").pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self, text="✕", width=28, fg_color="transparent", border_width=1, text_color="#e74c3c",
-                      command=lambda: on_remove(member)).pack(side="right", padx=4)
+        ctk.CTkLabel(self, text=str(score), width=80, text_color=theme.MUTED_FOREGROUND).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(self, text="✕", width=28, command=lambda: on_remove(member),
+                      corner_radius=theme.RADIUS_SM, **theme.ghost_button_style()).pack(side="right", padx=4)
 
 
 class ZSetEditor(ctk.CTkFrame):
-    def __init__(self, master, client, task_runner, key: str, status_bar, on_change):
+    def __init__(self, master, client, task_runner, key: str, toast, on_change, on_key_renamed, on_key_deleted):
         super().__init__(master, fg_color="transparent")
         self.client = client
         self.runner = task_runner
         self.key = key
-        self.status_bar = status_bar
+        self.toast = toast
         self.on_change = on_change
         self._rows_cache: list[tuple[str, float]] = []
         self._sort_ascending = True
 
+        self.meta_bar = KeyMetaBar(self, client, task_runner, key, "zset", toast,
+                                    on_renamed=on_key_renamed, on_deleted=on_key_deleted)
+        self.meta_bar.pack(fill="x", pady=(0, 8))
+
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x")
-        ctk.CTkLabel(header, text=f"Key: {key} (Sorted Set)", font=("Segoe UI", 15, "bold")).pack(side="left")
-        ctk.CTkButton(header, text="Sort by score", width=110, fg_color="transparent", border_width=1,
-                      command=self._sort_by_score).pack(side="right")
+        ctk.CTkButton(header, text="Sort by score", width=110, corner_radius=theme.RADIUS_SM,
+                      command=self._sort_by_score, **theme.ghost_button_style()).pack(side="right")
 
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent", height=310)
+        self.scroll = ctk.CTkScrollableFrame(self, height=310, **theme.card_style())
         self.scroll.pack(fill="both", expand=True, pady=8)
 
         row = ctk.CTkFrame(self, fg_color="transparent")
@@ -40,7 +45,8 @@ class ZSetEditor(ctk.CTkFrame):
         self.score_var = ctk.StringVar(value="0")
         ctk.CTkEntry(row, textvariable=self.member_var, placeholder_text="member").pack(side="left", fill="x", expand=True)
         ctk.CTkEntry(row, textvariable=self.score_var, placeholder_text="score", width=90).pack(side="left", padx=4)
-        ctk.CTkButton(row, text="Add / Update", fg_color="#2ecc71", hover_color="#27ae60", command=self._add).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(row, text="Add / Update", corner_radius=theme.RADIUS_SM,
+                      command=self._add, **theme.success_button_style()).pack(side="left", padx=(4, 0))
 
         self.load()
 
@@ -69,7 +75,7 @@ class ZSetEditor(ctk.CTkFrame):
         try:
             score = float(self.score_var.get())
         except ValueError:
-            self.status_bar.set_text("Score must be a number.", "error")
+            self.toast.show("Score must be a number.", "error")
             return
         self.runner.run(self.client.zadd, lambda _: self._on_saved(), self._on_error, self.key, member, score)
 
@@ -79,9 +85,9 @@ class ZSetEditor(ctk.CTkFrame):
     def _on_saved(self) -> None:
         self.member_var.set("")
         self.score_var.set("0")
-        self.status_bar.set_text(f"Updated '{self.key}'", "success")
+        self.toast.show(f"Updated '{self.key}'", "success")
         self.load()
         self.on_change()
 
     def _on_error(self, exc: Exception) -> None:
-        self.status_bar.set_text(format_redis_error(exc), "error")
+        self.toast.show(format_redis_error(exc), "error")
